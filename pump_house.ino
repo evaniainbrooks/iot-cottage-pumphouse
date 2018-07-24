@@ -81,7 +81,9 @@ void resetFunc(const __FlashStringHelper* msg) {
 
 /****************************** Feeds ***************************************/
 
-// Setup a feed called 'photocell' for publishing.
+#define WILL_FEED AIO_USERNAME "/feeds/nodes.pumphouse"
+Adafruit_MQTT_Publish lastwill = Adafruit_MQTT_Publish(&mqtt, WILL_FEED);
+
 // Notice MQTT paths for AIO follow the form: <username>/feeds/<feedname>
 Adafruit_MQTT_Publish temp = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/temperature");
 Adafruit_MQTT_Publish humid = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/humidity");
@@ -177,6 +179,7 @@ void setup() {
 
   //mqtt.subscribe(&lamptoggle);
   mqtt.subscribe(&togglewellpump);
+  mqtt.will(WILL_FEED, "0");
 
   server.begin();
 
@@ -366,6 +369,8 @@ void MQTT_ping() {
     if (!mqtt.ping()) {
       Serial.println(F("Failed to ping"));
       mqtt.disconnect();
+    } else {
+      lastwill.publish(String(now, DEC).c_str());
     }
   }
 }
