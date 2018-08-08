@@ -36,48 +36,56 @@ byte mac[] = {0xFE, 0xED, 0xDD, 0xAD, 0xBD, 0xEF};
 //Uncomment the following, and set to a valid ip if you don't have dhcp available.
 IPAddress iotIP (192, 168, 2, 102);
 
-#define AIO_SERVER      "io.adafruit.com"
+#define AIO_SERVER      "192.168.2.20"
 #define AIO_SERVERPORT  1883
-#define AIO_USERNAME    "abc"
-#define AIO_KEY         "xyz"
-
-#define ETHERNET_SHIELD_RESET_PIN 3
+#define AIO_USERNAME    "mosquitto"
+#define AIO_KEY         "qq211"
 
 #define RELAY_PIN_0 2 // x4
 #define RELAY_PIN_1 3 // x3
-#define RELAY_PIN_2 5 // x2
-#define RELAY_PIN_3 6 // x1
+#define HEATING_CABLE_ENABLE_PIN 5 // x2
+#define WELL_PUMP_ENABLE_PIN 6 // x1
 #define DHT_PIN 7
+
+
+#define MQTT_PING_INTERVAL_MS 60000
+#define SERVER_LISTEN_PORT 80
+#define MQTT_CONNECT_RETRY_MAX 5
 
 // Uncomment the type of sensor in use:
 #define DHT_TYPE DHT22     // DHT 22 (AM2302)
 
-#define VERSION_MESSAGE F("Pump House Console v0.12 24/07/18")
+#define VERSION_MESSAGE F("Pump House Console v0.14 27/07/18")
 
 // See guide for details on sensor wiring and usage:
 //   https://learn.adafruit.com/dht/overview
 
 DHT_Unified dht(DHT_PIN, DHT_TYPE);
 
-uint32_t delayMS;
+unsigned long sensorDelayMs;
+unsigned long lastSensorRead = 0;
+unsigned long lastPing = 0; // timestamp
+unsigned long connectedSince = 0; // timestamp
+unsigned long now = 0; // timestamp
+unsigned long nextConnectionAttempt = 0; // timestamp
+unsigned long failedConnectionAttempts = 0;
 
-//Set up the ethernet client
 EthernetClient client;
-
+EthernetServer server(80);
 Adafruit_MQTT_Client mqtt(&client, AIO_SERVER, AIO_SERVERPORT, AIO_USERNAME, AIO_KEY);
 
-// You don't need to change anything below this line!
 #define halt(s) { Serial.println(F( s )); while(1);  }
 
 void(* __resetFunc) (void) = 0; //declare reset function @ address 0
 
-void resetFunc(const __FlashStringHelper* msg) {
+void resetFunc(const __FlashStringHelper* msg, unsigned long delayMs) {
   Serial.println(msg);
-  Serial.println(F("Resetting in 2 seconds"));
-  delay(2000);
+  Serial.print(F("Resetting in "));
+  Serial.print(delayMs / 1000);
+  Serial.println(F("s"));
+  delay(delayMs);
   __resetFunc();
 }
-
 
 /****************************** Feeds ***************************************/
 
@@ -85,8 +93,8 @@ void resetFunc(const __FlashStringHelper* msg) {
 Adafruit_MQTT_Publish lastwill = Adafruit_MQTT_Publish(&mqtt, WILL_FEED);
 
 // Notice MQTT paths for AIO follow the form: <username>/feeds/<feedname>
-Adafruit_MQTT_Publish temp = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/temperature");
-Adafruit_MQTT_Publish humid = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/humidity");
+Adafruit_MQTT_Publish temp = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/pumphouse.temperature");
+Adafruit_MQTT_Publish humid = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/pumphouse.humidity");
 Adafruit_MQTT_Publish statuswellpump = Adafruit_MQTT_Publish(&mqtt, AIO_USERNAME "/feeds/status.wellpump");
 
 Adafruit_MQTT_Subscribe togglewellpump = Adafruit_MQTT_Subscribe(&mqtt, AIO_USERNAME "/feeds/toggle.wellpump");
@@ -100,10 +108,6 @@ Adafruit_MQTT_Subscribe toggleheating = Adafruit_MQTT_Subscribe(&mqtt, AIO_USERN
 
 /*************************** Sketch Code ************************************/
 
-// Initialize the Ethernet server library
-// with the IP address and port you want to use
-// (port 80 is default for HTTP):
-EthernetServer server(80);
 
 //const char lastError* = null;
 //unsigned long lastErrorTime = 0;
@@ -135,41 +139,35 @@ void initSensor() {
   Serial.print  ("Resolution:   "); Serial.print(sensor.resolution); Serial.println("%");
   Serial.println("------------------------------------");
   // Set delay between sensor readings based on sensor details.
-  delayMS = sensor.min_delay / 1000;
+  sensorDelayMs = sensor.min_delay / 1000;
 }
 
 void setup() {
 
-  Serial.begin(115200);
-
-  Serial.println(VERSION_MESSAGE);
-
-  pinMode(RELAY_PIN_0, OUTPUT);
-  pinMode(RELAY_PIN_1, OUTPUT);
-  pinMode(RELAY_PIN_2, OUTPUT);
-  pinMode(RELAY_PIN_3, OUTPUT);
-
-  digitalWrite(RELAY_PIN_0, HIGH);
-  digitalWrite(RELAY_PIN_1, HIGH);
-  digitalWrite(RELAY_PIN_0, LOW);
-  digitalWrite(RELAY_PIN_1, LOW);
-  digitalWrite(RELAY_PIN_2, HIGH);
-  digitalWrite(RELAY_PIN_3, HIGH);
-
-  // disable SD card
+  // Disable SD card
   pinMode(4, OUTPUT);
   digitalWrite(4, HIGH);
 
-  // Initialise the Client
+  pinMode(RELAY_PIN_0, OUTPUT);
+  pinMode(RELAY_PIN_1, OUTPUT);
+  pinMode(HEATING_CABLE_ENABLE_PIN, OUTPUT);
+  pinMode(WELL_PUMP_ENABLE_PIN, OUTPUT);
+
+  digitalWrite(RELAY_PIN_0, HIGH);
+  digitalWrite(RELAY_PIN_1, HIGH);
+  digitalWrite(HEATING_CABLE_ENABLE_PIN, HIGH);
+  digitalWrite(WELL_PUMP_ENABLE_PIN, HIGH);
+
+  Serial.begin(115200);
+
+  Serial.println(VERSION_MESSAGE);
   Serial.println(F("Joining the network..."));
   Ethernet.begin(mac);
-
-  delay(1000); //give the ethernet a second to initialize
-
-  Serial.print(F("Server is at "));
+  delay(2000); //give the ethernet a second to initialize
   Serial.println(Ethernet.localIP());
+
   if (Ethernet.localIP() == IPAddress(0,0,0,0)) {
-    resetFunc(F("Failed Ethernet.begin"));
+    resetFunc(F("DHCP resolution failed"), 30000);
   }
 
   delay(250);
@@ -200,9 +198,6 @@ void setup() {
 
     Serial.println(F("Finished init"));*/
 }
-
-
-unsigned long lastSensorRead = 0;
 
 void readSensor() {
 
@@ -301,8 +296,6 @@ float getVPP()
  }
 
 
-unsigned long now;
-
 void loop() {
   now = millis();
 
@@ -321,64 +314,61 @@ void loop() {
       Serial.println((char *)subscription->lastread);
 
       if (strcmp((char *)subscription->lastread, "1") == 0) {
-        digitalWrite(RELAY_PIN_3, HIGH);
+        digitalWrite(WELL_PUMP_ENABLE_PIN, HIGH);
       }
       if (strcmp((char *)subscription->lastread, "0") == 0) {
-        digitalWrite(RELAY_PIN_3, LOW);
+        digitalWrite(WELL_PUMP_ENABLE_PIN, LOW);
       }
     } else if (subscription == &toggleheating) {
       Serial.print(F("toggle heating cable"));
       Serial.println((char *)subscription->lastread);
 
       if (strcmp((char *)subscription->lastread, "1") == 0) {
-        digitalWrite(RELAY_PIN_2, HIGH);
+        digitalWrite(HEATING_CABLE_ENABLE_PIN, HIGH);
       }
       if (strcmp((char *)subscription->lastread, "0") == 0) {
-        digitalWrite(RELAY_PIN_2, LOW);
+        digitalWrite(HEATING_CABLE_ENABLE_PIN, LOW);
       }
     }
   }
 
   // Get temperature event and print its value.
-  if (lastSensorRead + 30000 < now) {
+  if (lastSensorRead + sensorDelayMs + 5000 < now) {
     Serial.println(F("sensorRead"));
     lastSensorRead = now;
     readSensor();
 
   }
 
-  //IR_decode();
-  MQTT_ping();
-
   handleHttpClientRequest();
 
   readAcs712();
 
-  delay(200);
-  //Serial.print(F("Loop "));
-  //Serial.println(now);
+  //IR_decode();
+  MQTT_ping();
+  delay(100); // readAcs712 samples for 1 second, so our loop is already at least that long
 }
 
-unsigned long lastPing = 0;
+// Function to connect and reconnect as necessary to the MQTT server.
+// Should be called in the loop function and it will take care if connecting.
 
 void MQTT_ping() {
 
-  if (lastPing + 60000 < now) {
+  if (!mqtt.connected()) {
+    return;
+  }
+
+  if (lastPing + MQTT_PING_INTERVAL_MS < now) {
     Serial.println(F("Ping"));
     lastPing = now;
     if (!mqtt.ping()) {
       Serial.println(F("Failed to ping"));
       mqtt.disconnect();
     } else {
-      lastwill.publish(String(now, DEC).c_str());
+      lastwill.publish(now);
     }
   }
 }
-
-// Function to connect and reconnect as necessary to the MQTT server.
-// Should be called in the loop function and it will take care if connecting.
-
-unsigned long connectedSince = 0;
 
 void MQTT_connect() {
   int8_t ret;
@@ -388,28 +378,35 @@ void MQTT_connect() {
     return;
   }
 
-  Serial.print(F("Connecting to MQTT... "));
+  if (nextConnectionAttempt < now) {
+    Serial.print(F("Connecting to MQTT... "));
 
-  int attempts = 0;
-  while (++attempts < 10 && (ret = mqtt.connect()) != 0) {
-    Serial.println(mqtt.connectErrorString(ret));
-    Serial.print(F("Retrying MQTT connection in "));
+    int delaySecs = (2 << failedConnectionAttempts); // Delay for 2, 4, 8 .. seconds
+    if (ret = mqtt.connect() != 0) {
+      Serial.print(F("Failed: "));
+      Serial.println(mqtt.connectErrorString(ret));
+      //mqtt.disconnect();
 
-    int delaySecs = (2 << attempts); // Delay for 2, 4, 8 .. seconds
-    Serial.print(delaySecs);
-    Serial.println(F(" seconds"));
-    mqtt.disconnect();
-    delay(delaySecs * 1000);
-  }
+      nextConnectionAttempt = now + delaySecs * 1000;
+      ++failedConnectionAttempts;
+    }
+  
+    if (0 == ret) {
+      connectedSince = millis();
+      failedConnectionAttempts = 0;
+      Serial.println(F("Connected!"));
+    } else if (failedConnectionAttempts > MQTT_CONNECT_RETRY_MAX) {
+      connectedSince = 0;
+      resetFunc(F("Max retries exhausted!"), 2000); // Reset and try again
+    } else {
+      Serial.print(F("Retrying in "));
 
-  if (0 == ret) {
-    connectedSince = millis();
-    Serial.println(F("MQTT Connected!"));
-  } else {
-    connectedSince = 0;
-    resetFunc(F("Failed connection!")); // Reset and try again
+      Serial.print(delaySecs);
+      Serial.println(F("s"));
+    }
   }
 }
+
 
 
 void handleHttpClientRequest() {
@@ -437,8 +434,8 @@ void handleHttpClientRequest() {
           client.println(F("<html>"));
           // output the value of each analog input pin
 
-          int pump = digitalRead(RELAY_PIN_3);
-          int heater = digitalRead(RELAY_PIN_2);
+          int pump = digitalRead(WELL_PUMP_ENABLE_PIN);
+          int heater = digitalRead(HEATING_CABLE_ENABLE_PIN);
           client.print(F("<h1>"));
           client.print(VERSION_MESSAGE);
           client.print(F("</h1>"));
